@@ -801,7 +801,13 @@ $("#fDownload").addEventListener("click", async () => {
     $("#ip").value = info.ip;
     $("#demoTag").hidden = !info.demo;
     if (info.connected) goLive(info.ip, null);
-    if (info.connected && info.mode === "play") setView("files");
+    else if (info.demo) $("#connectForm").requestSubmit();  // nothing to set up in demo mode
+    // #files opens the Files tab directly once connected.
+    const wantFiles = info.mode === "play" || location.hash === "#files";
+    if (wantFiles) {
+      for (let i = 0; i < 50 && !state.live; i++) await sleep(100);
+      if (state.live) setView("files");
+    }
   } catch {}
   poll();
 })();

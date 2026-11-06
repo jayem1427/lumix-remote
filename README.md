@@ -3,6 +3,8 @@
 Control a Panasonic Lumix G7 over Wi-Fi from a browser: live view, power zoom, manual focus,
 touch AF, record, photo, and copying files off the card.
 
+![Shoot tab: live view with zoom, focus, shutter and view controls](docs/shoot.png)
+
 - **No installs.** Python standard library only: one server script, one camera module, one HTML page.
 - **Runs anywhere Python runs.** Windows, macOS and Linux; any browser on the same machine.
 - **Built for rigs.** Hold-to-zoom and hold-to-focus controls, keyboard shortcuts, and view rotation for
@@ -40,7 +42,7 @@ It speaks the same HTTP API as the Panasonic Image App, so other Wi-Fi Lumix bod
 ## Quick start
 
 1. **Start the camera's access point.** On the G7: **Wi-Fi > New Connection > Remote Shooting & View**.
-2. **Join it** from your computer. The network is named after the camera, e.g. `G7-107EB7`.
+2. **Join it** from your computer. The network is named after the camera, e.g. `G7-1A2B3C`.
 3. **Run the smoke test.** The first time, the camera asks whether to allow **G7Remote**; choose Yes.
 
    ```
@@ -65,8 +67,11 @@ It speaks the same HTTP API as the Panasonic Image App, so other Wi-Fi Lumix bod
    python app.py
    ```
 
-To try the interface without a camera, run `python app.py --demo`. It simulates the camera's replies
-and a card full of files.
+   ![Connect screen](docs/connect.png)
+
+To try the interface without a camera, run `python app.py --demo`. It simulates the camera's replies,
+plays a test image as live view and fills the card with sample files. The screenshots here are from
+demo mode.
 
 ## Using the GUI
 
@@ -95,6 +100,8 @@ the sensor, so it still lands where you click. Both settings are remembered by t
 ## Transferring files
 
 The **Files** tab switches the camera to playback, which pauses live view, and lists the card.
+
+![Files tab: thumbnail grid with filters and download](docs/files.png)
 
 - Click tiles to select, Shift-click for a range. **Select new** picks everything not yet downloaded.
 - Filter by **All / Photos / Videos**.

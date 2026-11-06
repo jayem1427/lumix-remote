@@ -23,6 +23,7 @@ from lumix import DEFAULT_IP, CameraError, CamFile, LiveView, Lumix, Reply, down
 
 INDEX = Path(__file__).with_name("index.html")
 DEFAULT_DEST = Path.home() / "Pictures" / "G7"
+DEMO_ASSETS = Path(__file__).with_name("assets") / "demo"
 
 
 class FakeLumix(Lumix):
@@ -57,16 +58,45 @@ class FakeLumix(Lumix):
             video = i % 5 == 0
             name = f"P10{i:05d}.{'MP4' if video else 'JPG'}"
             size = 48_000_000 if video else 6_200_000
-            res = [{"url": f"demo://DO{name}", "protocol": "video/mp4" if video else "image/jpeg", "size": size}]
+            res = [{"url": f"demo://DO{name}", "protocol": "video/mp4" if video else "image/jpeg", "size": size},
+                   {"url": f"demo://DT{name}", "protocol": "image/jpeg:DLNA.ORG_PN=JPEG_TN", "size": 0}]
             out.append(CamFile(str(i), name, "object.item.videoItem" if video else "object.item.imageItem",
                                f"2026-11-0{1 + i % 5}T1{i % 10}:2{i % 6}:00", res))
         return out
+
+    @staticmethod
+    def thumb(fid: str) -> bytes | None:
+        p = DEMO_ASSETS / f"thumb{int(fid) % 6}.jpg"
+        return p.read_bytes() if p.exists() else None
+
+
+class FakeLiveView(LiveView):
+    """Replays a still frame at 10 fps instead of listening for the camera's UDP stream."""
+
+    def start(self) -> None:
+        if self._sock is not None or not (DEMO_ASSETS / "frame.jpg").exists():
+            return
+        self._sock = True  # marks running; there is no real socket
+        self._stop.clear()
+        frame = (DEMO_ASSETS / "frame.jpg").read_bytes()
+
+        def loop():
+            while not self._stop.wait(0.1):
+                with self._cond:
+                    self.frame, self.seq = frame, self.seq + 1
+                    self._cond.notify_all()
+
+        threading.Thread(target=loop, daemon=True).start()
+
+    def stop(self) -> None:
+        self._stop.set()
+        self._sock = None
 
 
 class App:
     def __init__(self, cam: Lumix, demo: bool, dest: Path = DEFAULT_DEST):
         self.cam, self.demo, self.dest = cam, demo, dest
-        self.live = LiveView(cam)
+        self.live = FakeLiveView(cam) if demo else LiveView(cam)
         self.connected = False
         self.mode = "rec"
         self.lock = threading.Lock()
@@ -111,7 +141,9 @@ class App:
             return self.thumbs[fid]
         f = self.files.get(fid)
         r = f and (f.thumb or f.preview)
-        if not r or self.demo:
+        if self.demo:
+            return self.cam.thumb(fid)
+        if not r:
             return None
         with self.thumb_lock:  # one request at a time; the camera's server is slow under load
             if fid not in self.thumbs:
