@@ -122,6 +122,19 @@
     font: 13px var(--mono); outline: none; user-select: text;
   }
   .connect input:focus { border-color: var(--accent); }
+  .found { margin-top: 14px; display: grid; gap: 6px; }
+  .found .row {
+    display: flex; align-items: center; gap: 12px; width: 100%; padding: 9px 12px; text-align: left;
+    background: var(--bg); border: 1px solid var(--line); border-radius: 6px; cursor: pointer;
+  }
+  .found .row:hover { border-color: var(--line-hi); }
+  .found .row.on { border-color: var(--accent); }
+  .found .row b { font-weight: 500; }
+  .found .row span { font: 12px var(--mono); color: var(--dim); }
+  .found .row span:last-child { margin-left: auto; color: var(--faint); }
+  .found-status { font: 12px var(--mono); color: var(--faint); display: flex; justify-content: space-between; }
+  .linkbtn { background: none; border: 0; padding: 0; color: var(--dim); cursor: pointer; font: 12px var(--mono); text-decoration: underline; text-underline-offset: 3px; }
+  .linkbtn:hover { color: var(--text); }
   .connect .err { margin-top: 12px; min-height: 18px; color: var(--rec); font: 12px var(--mono); user-select: text; }
 
   /* controls */
@@ -292,9 +305,12 @@
           <h1>Connect to the camera</h1>
           <ol>
             <li><span>On the G7: <b>Wi-Fi</b> &rsaquo; <b>New Connection</b> &rsaquo; <b>Remote Shooting &amp; View</b></span></li>
-            <li><span>Join the camera's network from this PC</span></li>
-            <li><span>Connect, then accept the prompt on the camera if it asks</span></li>
+            <li><span>Join the camera's own network, or put the camera on yours with <b>DISP.</b> &rsaquo; <b>Via Network</b></span></li>
+            <li><span>Pick the camera below and connect; accept the prompt on the camera if it asks</span></li>
           </ol>
+          <div class="found-status"><span id="findStatus">Searching...</span><button class="linkbtn" id="findBtn" type="button">Search again</button></div>
+          <div class="found" id="found"></div>
+          <div style="height:14px"></div>
           <form id="connectForm">
             <input id="ip" value="192.168.54.1" spellcheck="false" aria-label="Camera IP">
             <button class="btn" style="width:auto" id="connectBtn">Connect</button>
@@ -613,7 +629,10 @@ $("#connectForm").addEventListener("submit", async (e) => {
   btn.disabled = false;
   btn.textContent = "Connect";
   log("connect", res);
-  if (res.ok) goLive(ip, res.live_error);
+  if (res.ok) {
+    try { localStorage.setItem("g7ip", ip); } catch {}
+    goLive(ip, res.live_error);
+  }
   else $("#connectErr").textContent = res.error;
 });
 
@@ -635,6 +654,34 @@ async function poll() {
   }
   setTimeout(poll, 1500);
 }
+
+/* ---------- camera discovery ---------- */
+async function findCameras() {
+  const status = $("#findStatus"), list = $("#found");
+  status.textContent = "Searching the network...";
+  $("#findBtn").disabled = true;
+  let cams = [];
+  try { cams = (await (await fetch("/api/discover")).json()).cameras || []; } catch {}
+  $("#findBtn").disabled = false;
+  status.textContent = cams.length
+    ? `Found ${cams.length} camera${cams.length > 1 ? "s" : ""}`
+    : "No camera found - is Remote Shooting & View waiting?";
+  const pick = (ip) => {
+    $("#ip").value = ip;
+    list.querySelectorAll(".row").forEach((r) => r.classList.toggle("on", r.dataset.ip === ip));
+  };
+  list.replaceChildren(...cams.map((c) => {
+    const row = el("button", "row");
+    row.type = "button";
+    row.dataset.ip = c.ip;
+    row.append(el("b", null, c.name || "Lumix"), el("span", null, c.ip), el("span", null, c.batt ? `batt ${c.batt}` : ""));
+    row.addEventListener("click", () => pick(c.ip));
+    row.addEventListener("dblclick", () => $("#connectForm").requestSubmit());
+    return row;
+  }));
+  if (cams.length) pick((cams.find((c) => c.ip === $("#ip").value) || cams[0]).ip);
+}
+$("#findBtn").addEventListener("click", findCameras);
 
 /* ---------- files ---------- */
 const files = { list: [], sel: new Set(), filter: "all", last: null, dest: "" };
@@ -798,8 +845,11 @@ $("#fDownload").addEventListener("click", async () => {
 (async () => {
   try {
     const info = await (await fetch("/api/info")).json();
-    $("#ip").value = info.ip;
+    let last = null;
+    try { last = localStorage.getItem("g7ip"); } catch {}
+    $("#ip").value = info.ip !== "192.168.54.1" ? info.ip : last || info.ip;
     $("#demoTag").hidden = !info.demo;
+    if (!info.connected && !info.demo) findCameras();
     if (info.connected) goLive(info.ip, null);
     else if (info.demo) $("#connectForm").requestSubmit();  // nothing to set up in demo mode
     // #files opens the Files tab directly once connected.

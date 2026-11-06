@@ -9,6 +9,7 @@ Speaks the HTTP API the Panasonic Image App uses. Standard library only.
 from __future__ import annotations
 
 import argparse
+import select
 import socket
 import sys
 import threading
@@ -16,6 +17,7 @@ import time
 import urllib.parse
 import urllib.request
 import xml.etree.ElementTree as ET
+from concurrent.futures import ThreadPoolExecutor
 
 DEFAULT_IP = "192.168.54.1"
 STREAM_PORT = 49199
@@ -265,6 +267,83 @@ class MediaServer:
         )
 
 
+def _local_ipv4() -> list[str]:
+    """This machine's IPv4 addresses, so SSDP can be sent out of every interface."""
+    ips = set()
+    try:
+        for info in socket.getaddrinfo(socket.gethostname(), None, socket.AF_INET):
+            ips.add(info[4][0])
+    except OSError:
+        pass
+    for probe in ("192.168.54.1", "10.255.255.255"):
+        try:
+            with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
+                s.connect((probe, 9))
+                ips.add(s.getsockname()[0])
+        except OSError:
+            pass
+    return sorted(ip for ip in ips if not ip.startswith(("127.", "169.254.")))
+
+
+def discover(timeout: float = 2.5) -> list[dict]:
+    """Find Lumix cameras: SSDP on every interface, plus the camera's own access point address.
+
+    Returns [{"ip", "name", "batt"}], each confirmed by a getstate reply.
+    """
+    msg = (
+        "M-SEARCH * HTTP/1.1\r\nHOST: 239.255.255.250:1900\r\nMAN: \"ssdp:discover\"\r\nMX: 2\r\n"
+        "ST: ssdp:all\r\n\r\n"
+    ).encode()
+    found: dict[str, str] = {}  # ip -> description URL
+    socks = []
+    for ip in _local_ipv4():
+        try:
+            s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            s.bind((ip, 0))
+            s.setblocking(False)
+            s.sendto(msg, ("239.255.255.250", 1900))
+            socks.append(s)
+        except OSError:
+            pass
+    deadline = time.monotonic() + timeout
+    while socks and time.monotonic() < deadline:
+        ready, _, _ = select.select(socks, [], [], max(0.0, deadline - time.monotonic()))
+        for s in ready:
+            try:
+                data, addr = s.recvfrom(4096)
+            except OSError:
+                continue
+            head = data.decode("utf-8", "replace")
+            if "panasonic" not in head.lower():
+                continue
+            loc = next((l.split(":", 1)[1].strip() for l in head.splitlines() if l.lower().startswith("location:")), "")
+            found.setdefault(addr[0], loc)
+    for s in socks:
+        s.close()
+    found.setdefault(DEFAULT_IP, "")
+
+    def confirm(item):
+        ip, loc = item
+        cam = Lumix(ip, timeout=1.5)
+        try:
+            state = cam.cgi("getstate", check=False)
+        except CameraError:
+            return None
+        if not state.result:
+            return None
+        name = ""
+        if loc:
+            try:
+                desc = ET.fromstring(fetch(loc, timeout=2))
+                name = next((el.text or "" for el in desc.iter() if el.tag.endswith("friendlyName")), "")
+            except (CameraError, ET.ParseError):
+                pass
+        return {"ip": ip, "name": name.strip(), "batt": state.fields.get("batt", "")}
+
+    with ThreadPoolExecutor(8) as ex:
+        return [c for c in ex.map(confirm, found.items()) if c]
+
+
 def fetch(url: str, timeout: float = 10.0) -> bytes:
     try:
         with _opener.open(url, timeout=timeout) as r:
@@ -455,8 +534,16 @@ def main() -> int:
     r = sub.add_parser("raw", help="send one cam.cgi request, e.g. mode=camcmd value=zoomstop")
     r.add_argument("params", nargs="+")
     sub.add_parser("files", help="list the card's files (switches the camera to play mode)")
+    sub.add_parser("find", help="search the network for cameras")
     args = p.parse_args()
 
+    if args.cmd == "find":
+        cams = discover()
+        for c in cams:
+            print(f"{c['ip']:15}  {c['name'] or 'Lumix'}  batt={c['batt']}")
+        if not cams:
+            print("No camera found. Is Remote Shooting & View waiting for a connection?")
+        return 0 if cams else 1
     cam = Lumix(args.ip)
     if args.cmd == "test":
         return smoke_test(cam, args.record)

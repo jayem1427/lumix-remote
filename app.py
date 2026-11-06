@@ -19,7 +19,7 @@ import os
 import subprocess
 import sys
 
-from lumix import DEFAULT_IP, CameraError, CamFile, LiveView, Lumix, Reply, download, fetch
+from lumix import DEFAULT_IP, CameraError, CamFile, LiveView, Lumix, Reply, discover, download, fetch
 
 INDEX = Path(__file__).with_name("index.html")
 DEFAULT_DEST = Path.home() / "Pictures" / "G7"
@@ -262,6 +262,12 @@ def make_handler(app: App):
                 self.wfile.write(body)
             elif path == "/api/info":
                 self._json({"demo": app.demo, "ip": app.cam.ip, "connected": app.connected, "mode": app.mode})
+            elif path == "/api/discover":
+                if app.demo:
+                    cams = [{"ip": DEFAULT_IP, "name": "G7-DEMO", "batt": "3/3"}]
+                else:
+                    cams = discover()
+                self._json({"cameras": cams})
             elif path == "/api/files/job":
                 self._json(app.job)
             elif path == "/api/files/thumb":

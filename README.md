@@ -41,12 +41,30 @@ It speaks the same HTTP API as the Panasonic Image App, so other Wi-Fi Lumix bod
 
 ## Quick start
 
-1. **Start the camera's access point.** On the G7: **Wi-Fi > New Connection > Remote Shooting & View**.
-2. **Join it** from your computer. The network is named after the camera, e.g. `G7-1A2B3C`.
-3. **Run the smoke test.** The first time, the camera asks whether to allow **G7Remote**; choose Yes.
+1. **Put the camera in remote mode.** On the G7: **Wi-Fi > New Connection > Remote Shooting & View**.
+2. **Get the camera and computer on one network.** Either way works:
+   - **Your home Wi-Fi (recommended).** On the screen that asks you to connect a smartphone, press
+     **DISP.**, choose **Via Network**, then pick your network from the list and enter its password
+     (DISP. also switches the keyboard between letters, numbers and symbols). The G7 joins 2.4 GHz
+     networks only. Your computer keeps its internet connection.
+   - **The camera's own network.** Join the network named after the camera, e.g. `G7-1A2B3C`. The
+     camera is then at `192.168.54.1`, and your computer has no internet while connected.
+
+   To see where the camera is:
 
    ```
-   python lumix.py test
+   python lumix.py find
+   ```
+
+   ```
+   10.0.0.25        G7-1A2B3C  batt=3/3
+   ```
+
+3. **Run the smoke test.** The first time, the camera asks whether to allow **G7Remote**; choose Yes.
+   Add `--ip` with the address from `find` if the camera is on your home network.
+
+   ```
+   python lumix.py --ip 10.0.0.25 test
    ```
 
    Each step prints PASS or FAIL with its timing:
@@ -61,7 +79,8 @@ It speaks the same HTTP API as the Panasonic Image App, so other Wi-Fi Lumix bod
    PASS  live view frame                1592 ms  saved liveview.jpg (22344 bytes)
    ```
 
-4. **Start the GUI.** It opens http://localhost:8754 in your browser. Press **Connect**.
+4. **Start the GUI.** It opens http://localhost:8754 in your browser and searches for cameras. Pick
+   yours and press **Connect**. The last address you connected to is remembered.
 
    ```
    python app.py
@@ -118,6 +137,7 @@ hour of footage.
 ## Command line
 
 ```
+python lumix.py find                            # search the network for cameras
 python lumix.py test [--record]                 # smoke test; --record also shoots a 3 s clip
 python lumix.py files                           # list every file and resource URL on the card
 python lumix.py raw mode=camcmd value=zoomstop  # send any cam.cgi request, print the raw reply
@@ -150,6 +170,10 @@ The camera runs its own Wi-Fi access point and serves three things:
    UPnP ContentDirectory. `MediaServer` finds it through SSDP discovery (falling back to
    `:60606/Server0/CDS_control`) and pages through it with SOAP `Browse` calls. Each file comes with
    several resources: the original, a large preview and a thumbnail.
+
+**Finding the camera.** `discover()` sends an SSDP search out of every network interface, keeps the
+devices whose reply names Panasonic, adds `192.168.54.1` for the direct-connection case, and keeps
+only those that answer `getstate`. The camera's name comes from its UPnP device description.
 
 **Connecting.** The client first sends `mode=accctrl&type=req_acc` with a device ID and the name
 `G7Remote`. If the camera answers `ok_under_research`, it is showing an approval prompt and the client
@@ -211,6 +235,8 @@ Failures raise `CameraError` with the request and the camera's reply, e.g.
 |---|---|
 | `err_reject` on connect | The camera hasn't approved this device. Accept the prompt on the camera; the client waits up to 45 s. |
 | `no reply from 192.168.54.1` | The computer isn't on the camera's Wi-Fi, or the camera has left remote mode. Rejoin the network. |
+| `find` shows nothing | The camera isn't waiting in Remote Shooting & View, or it's on another network. A VPN can also hide local devices; enable its LAN access option. |
+| The camera's address changed | Your router assigned a new one. Run `find`, or reserve an address for the camera in the router. |
 | Connect works, no live view | The firewall is blocking UDP 49199. Allow Python on private networks. |
 | Focus says `err_reject` | Set the focus mode lever to **MF**. |
 | Zoom says `needs a power zoom lens` | The lens has a manual zoom ring. |
@@ -224,6 +250,7 @@ Failures raise `CameraError` with the request and the camera's reply, e.g.
 | Feature | G7, tested |
 |---|---|
 | Connect and approval prompt | yes |
+| Camera on home Wi-Fi (Via Network) and discovery | yes |
 | Status readout | yes |
 | Power zoom | yes |
 | Touch AF | yes |
