@@ -1,0 +1,6 @@
+__pycache__/
+*.pyc
+*.part
+liveview.jpg
+.venv/
+.DS_Store
