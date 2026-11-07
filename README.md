@@ -321,7 +321,7 @@ Failures raise `CameraError` with the request and the camera's reply, e.g.
 | File listing and download | not yet (works in `--demo`) |
 | Gimbal pan (RS 3 Mini, Bluetooth) | yes |
 | Gimbal tilt | not yet (speed slot assumed) |
-| Person tracking | detector tested on a still; not yet live |
+| Person tracking (pan, portrait-mounted camera) | yes |
 
 ## Roadmap
 
