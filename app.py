@@ -2,7 +2,7 @@
 """Browser GUI for the Lumix remote.
 
     python app.py            # serve http://localhost:8754 and open it
-    python app.py --demo     # simulated camera, for trying the UI without one
+    python app.py --demo     # simulated camera and gimbal, for trying the UI without them
 """
 from __future__ import annotations
 
@@ -19,7 +19,9 @@ import os
 import subprocess
 import sys
 
+from gimbal import GimbalLink
 from lumix import DEFAULT_IP, CameraError, CamFile, LiveView, Lumix, Reply, discover, download, fetch
+from tracker import FakeGimbal, Tracker
 
 INDEX = Path(__file__).with_name("index.html")
 DEFAULT_DEST = Path.home() / "Pictures" / "G7"
@@ -104,6 +106,41 @@ class App:
         self.thumbs: dict[str, bytes] = {}
         self.thumb_lock = threading.Lock()
         self.job: dict = {"running": False}
+        self.gimbal = FakeGimbal() if demo else GimbalLink()
+        self.manual_until = 0.0  # manual gimbal moves pause tracking until then
+        self.tracker = Tracker(self.live, self.gimbal, lambda: self.manual_until)
+
+    # --- gimbal and tracking -----------------------------------------------------------------
+    def gimbal_move(self, a: dict) -> dict:
+        speeds = {k: float(a.get(k) or 0) for k in ("yaw", "pitch", "roll")}
+        if any(speeds.values()):
+            self.manual_until = time.monotonic() + 0.5
+        self.gimbal.move(**speeds)
+        return {"gimbal": self.gimbal.status()}
+
+    def track(self, action: str, a: dict) -> dict:
+        t = self.tracker
+        t.configure(**{k: a.get(k) for k in ("rot", "mirror", "tilt", "gain", "speed")})
+        if action == "start":
+            t.start()
+        elif action == "stop":
+            t.stop()
+        elif action == "enable":
+            if a.get("on") and self.gimbal.state != "on":
+                raise RuntimeError("connect the gimbal first")
+            if a.get("on"):
+                t.start()
+            t.enable(bool(a.get("on")))
+        elif action == "lock":
+            if t.lock_at(float(a["x"]), float(a["y"])) is None:
+                raise ValueError("no person at that point")
+        elif action == "unlock":
+            t.unlock()
+        elif action == "recalibrate":
+            t.recalibrate()
+        elif action != "config":
+            raise ValueError(f"unknown tracking action {action!r}")
+        return {"track": t.status()}
 
     # --- files -------------------------------------------------------------------------------
     def _local(self, f: CamFile) -> bool:
@@ -261,7 +298,12 @@ def make_handler(app: App):
                 self.end_headers()
                 self.wfile.write(body)
             elif path == "/api/info":
-                self._json({"demo": app.demo, "ip": app.cam.ip, "connected": app.connected, "mode": app.mode})
+                self._json({"demo": app.demo, "ip": app.cam.ip, "connected": app.connected, "mode": app.mode,
+                            "gimbal": app.gimbal.status(), "track": app.tracker.status()})
+            elif path == "/api/gimbal":
+                self._json(app.gimbal.status())
+            elif path == "/api/track":
+                self._json(dict(app.tracker.status(), gimbal=app.gimbal.status()))
             elif path == "/api/discover":
                 if app.demo:
                     cams = [{"ip": DEFAULT_IP, "name": "G7-DEMO", "batt": "3/3"}]
@@ -309,6 +351,16 @@ def make_handler(app: App):
                     if app.mode != "rec":
                         raise CameraError("camera is in play mode; switch back to Shoot")
                     out = app.run(a.get("action", ""), a)
+                elif path == "/api/gimbal/connect":
+                    app.gimbal.connect()
+                    out = {"gimbal": app.gimbal.status()}
+                elif path == "/api/gimbal/move":
+                    out = app.gimbal_move(a)
+                elif path == "/api/gimbal/stop":
+                    app.gimbal.stop()
+                    out = {"gimbal": app.gimbal.status()}
+                elif path.startswith("/api/track/"):
+                    out = app.track(path.rsplit("/", 1)[1], a)
                 elif path.startswith("/api/files/") and not app.connected:
                     raise CameraError("not connected")
                 elif path == "/api/files/open":
@@ -322,7 +374,7 @@ def make_handler(app: App):
                 else:
                     return self.send_error(404)
                 self._json({"ok": True, "ms": round(1000 * (time.perf_counter() - t)), **(out or {})})
-            except (CameraError, ValueError, KeyError, OSError) as e:
+            except (CameraError, ValueError, KeyError, OSError, RuntimeError, TimeoutError) as e:
                 self._json({"ok": False, "ms": round(1000 * (time.perf_counter() - t)), "error": str(e)})
 
         def _stream(self):
@@ -366,6 +418,8 @@ def main():
     except KeyboardInterrupt:
         pass
     finally:
+        app.tracker.stop()
+        app.gimbal.close()
         app.live.stop()
 
 

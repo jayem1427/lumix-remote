@@ -4,3 +4,4 @@ __pycache__/
 liveview.jpg
 .venv/
 .DS_Store
+*.pt

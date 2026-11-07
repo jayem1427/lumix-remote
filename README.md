@@ -20,6 +20,7 @@ It speaks the same HTTP API as the Panasonic Image App, so other Wi-Fi Lumix bod
 - [Requirements](#requirements)
 - [Quick start](#quick-start)
 - [Using the GUI](#using-the-gui)
+- [Gimbal and person tracking](#gimbal-and-person-tracking)
 - [Transferring files](#transferring-files)
 - [Command line](#command-line)
 - [How it works](#how-it-works)
@@ -38,6 +39,17 @@ It speaks the same HTTP API as the Panasonic Image App, so other Wi-Fi Lumix bod
 | Zoom | A **power zoom** lens, e.g. Lumix 14-42 PZ or 45-175 PZ. A manual zoom ring can't be driven. |
 | Focus | Any focus-by-wire Micro Four Thirds lens, with the camera's focus mode set to **MF** |
 | Firewall | Incoming UDP on port **49199** allowed for Python (live view) |
+| Gimbal (optional) | DJI RS 3 Mini, and a PC with Bluetooth LE. `pip install bleak` |
+| Tracking (optional) | `pip install ultralytics` (pulls in PyTorch, about 1 GB). Runs on the CPU at about 15 fps |
+
+For the gimbal and tracking, a virtual environment keeps those packages apart:
+
+```
+python -m venv .venv
+.venv\Scripts\python -m pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu
+.venv\Scripts\python -m pip install ultralytics bleak lap
+.venv\Scripts\python app.py
+```
 
 ## Quick start
 
@@ -116,6 +128,44 @@ last command, the camera's reply and the round-trip time, which is handy when so
 **Rotate and Mirror** change only what you see, never the recording. Click-to-focus is mapped back to
 the sensor, so it still lands where you click. Both settings are remembered by the browser.
 
+## Gimbal and person tracking
+
+The **Gimbal** panel drives a DJI RS 3 Mini over Bluetooth LE, with no phone and no extra hardware.
+Close the Ronin app first, because the gimbal accepts one connection at a time.
+
+| Action | Control | Key |
+|---|---|---|
+| Connect the gimbal | **Connect gimbal** | **B** |
+| Pan and tilt | hold the arrow pad | hold the arrow keys (Shift doubles the speed) |
+| Stop | **STOP** | **Esc** |
+| Follow a person | **Track person** | **T** |
+| Follow someone else | click their box in the live view | |
+| Follow up and down as well | **Tilt** | |
+
+**Track person** finds people in the live view with YOLO (`yolo11n`, downloaded on first use, 5 MB).
+It draws a box around each person and follows the largest one. Click a box to follow someone else.
+The gimbal pans to keep that person's upper body near the centre of the frame, and **Speed** sets
+how fast it may turn. Rotate and Mirror are taken into account, so it works with a portrait-mounted
+camera.
+
+**First use.** Nobody records which way the gimbal turns for a positive command, so the tracker
+learns it. In the first second or two of following someone, it checks whether the person moves toward
+the centre or away from it, and reverses the direction if needed. The result is saved in
+`~/.g7remote.json`, and the arrow keys use it too. Delete that file to learn again.
+
+**Safety.** The gimbal moves only while commands keep arriving. The server stops it 0.6 s after the
+last one, so a closed tab, a crashed browser or a lost connection all leave it still. Using the arrow
+pad pauses tracking until you let go.
+
+The gimbal can also be driven from the command line:
+
+```
+python gimbal.py scan                 # is it there?
+python gimbal.py listen 10            # print what it sends
+python gimbal.py move yaw 300 1.5     # pan at speed 300 for 1.5 s
+python gimbal.py selftest             # protocol checks, no gimbal needed
+```
+
 ## Transferring files
 
 The **Files** tab switches the camera to playback, which pauses live view, and lists the card.
@@ -144,6 +194,7 @@ python lumix.py raw mode=camcmd value=zoomstop  # send any cam.cgi request, prin
 python lumix.py --ip 192.168.54.1 ...           # camera address (that's the default)
 
 python app.py [--ip IP] [--port 8754] [--dest DIR] [--demo] [--no-browser]
+python gimbal.py scan | listen [s] | move <yaw|roll|pitch> <speed> <s> | raw <set> <id> <hex> | selftest
 ```
 
 ## How it works
@@ -178,6 +229,17 @@ only those that answer `getstate`. The camera's name comes from its UPnP device 
 **Connecting.** The client first sends `mode=accctrl&type=req_acc` with a device ID and the name
 `G7Remote`. If the camera answers `ok_under_research`, it is showing an approval prompt and the client
 keeps asking until you accept. Then it confirms with `getstate` and switches to record mode.
+
+**The gimbal.** The RS 3 Mini speaks DJI's DUML framing over a Bluetooth LE service (`fff0`):
+commands go to characteristic `fff5` and status frames arrive on `fff4`. A frame is `0x55`, a length
+and version, a CRC-8 of that header, sender and receiver IDs, a sequence number, a command set and ID,
+the payload and a CRC-16. Both CRCs were checked against frames captured from the gimbal. Movement is
+set `0x04`, ID `0x0C`: three 16-bit speeds (yaw, roll, pitch) and a flag byte. The gimbal keeps
+moving only while the command is repeated, so it is sent 10 times a second.
+
+**Tracking.** `tracker.py` reads each live-view frame, runs YOLO with ByteTrack so every person keeps
+an ID, and turns the target's distance from the centre into a pan speed (proportional, with a little
+damping for the live-view lag of about 0.2 s).
 
 **Safety.** Hold controls send a stop on release, on pointer cancel, on window blur and when the tab is
 hidden. Focus repeats only after the previous request has returned, so slow replies don't pile up.
@@ -258,13 +320,15 @@ Failures raise `CameraError` with the request and the camera's reply, e.g.
 | Manual focus | not yet (needs MF mode) |
 | Record and photo | not yet |
 | File listing and download | not yet (works in `--demo`) |
+| Gimbal pan (RS 3 Mini, Bluetooth) | yes |
+| Gimbal tilt | not yet (speed slot assumed) |
+| Person tracking | detector tested on a still; not yet live |
 
 ## Roadmap
 
-- **Gimbal bridge.** Run `lumix.py` on a Raspberry Pi Zero 2 W mounted on a DJI RS 3 Mini. A rotary
-  encoder drives zoom and focus. A later step would map the gimbal's own camera-control button
-  (half-press AF, press record, hold photo) by having the Pi stand in for a supported camera on the
-  gimbal's USB-C camera-control port.
+- **Gimbal buttons.** The RS 3 Mini's record and trigger buttons don't send anything over this
+  link. Mapping them to the camera would need the PC to pose as a supported camera.
+- Confirm the tilt and roll speed slots, and the speed unit.
 - Serve the GUI from the bridge so a phone can be the monitor.
 
 ## Disclaimer

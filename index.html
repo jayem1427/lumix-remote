@@ -215,6 +215,29 @@
   footer .ms { margin-left: auto; }
   footer #log { overflow: hidden; text-overflow: ellipsis; user-select: text; }
 
+  /* gimbal + tracking */
+  body:not(.live) aside .gimbal .btn { opacity: 1; pointer-events: auto; }
+  .gimbal .btn.need { opacity: .4; pointer-events: none; }
+  .gimbal.on .btn.need { opacity: 1; pointer-events: auto; }
+  body:not(.live) aside .gimbal .btn.need-cam { opacity: .4; pointer-events: none; }
+  h2 em.on { color: var(--ok); }
+  .gpad { display: grid; grid-template-columns: repeat(3, 1fr); gap: 6px; }
+  .gpad .btn { height: 44px; justify-content: center; padding: 0; font-size: 16px; }
+  .gpad .gap { visibility: hidden; }
+  .gpad .stopbtn { font: 600 11px var(--mono); letter-spacing: .06em; color: var(--dim); }
+  .slider { display: grid; grid-template-columns: auto 1fr 38px; align-items: center; gap: 12px; margin-top: 12px; font-size: 12px; color: var(--dim); }
+  .slider span { font: 12px var(--mono); color: var(--text); text-align: right; }
+  input[type=range] { accent-color: var(--accent); width: 100%; margin: 0; }
+  .trackrow { display: grid; grid-template-columns: 1fr auto; gap: 6px; margin-top: 12px; }
+  .trackrow .btn.toggle[aria-pressed="true"] { background: color-mix(in srgb, var(--accent) 10%, var(--raised)); }
+  #tiltBtn { width: auto; padding: 0 14px; }
+  .track-hint { margin-top: 8px; font: 11px var(--mono); color: var(--faint); min-height: 15px; }
+  .track-hint.live { color: var(--accent); }
+  .boxes { position: absolute; left: 50%; top: 50%; width: 100%; height: 100%; transform: translate(-50%, -50%); pointer-events: none; transition: transform .2s; }
+  .boxes i { position: absolute; border: 1px dashed rgba(255,255,255,.55); border-radius: 3px; }
+  .boxes i.lock { border: 2px solid var(--accent); box-shadow: 0 0 0 1px rgba(0,0,0,.4); }
+  .viewer.tracking { box-shadow: 0 0 0 2px var(--accent); }
+
   [hidden] { display: none !important; }
 
   /* view tabs */
@@ -298,6 +321,7 @@
       <div class="waiting" id="waiting">Waiting for live view</div>
       <img id="live" alt="">
       <div class="thirds" id="thirds"><i></i><i></i><i></i><i></i></div>
+      <div class="boxes" id="boxes"></div>
       <div class="rec-badge"><span id="badgeTc">REC</span></div>
 
       <div class="connect" id="connect">
@@ -322,6 +346,28 @@
   </div>
 
   <aside>
+    <section class="gimbal" id="gimbalSec">
+      <h2>Gimbal <em id="gStatus">offline</em></h2>
+      <button class="btn" id="gConnect"><span>Connect gimbal</span><kbd>B</kbd></button>
+      <div class="gpad" id="gPad" hidden>
+        <span class="gap"></span>
+        <button class="btn need" data-gdir="up" aria-label="Tilt up">&uarr;</button>
+        <span class="gap"></span>
+        <button class="btn need" data-gdir="left" aria-label="Pan left">&larr;</button>
+        <button class="btn need stopbtn" id="gStop">STOP</button>
+        <button class="btn need" data-gdir="right" aria-label="Pan right">&rarr;</button>
+        <span class="gap"></span>
+        <button class="btn need" data-gdir="down" aria-label="Tilt down">&darr;</button>
+        <span class="gap"></span>
+      </div>
+      <label class="slider">Speed <input type="range" id="gSpeed" min="10" max="100" step="5" value="40"><span id="gSpeedVal">40%</span></label>
+      <div class="trackrow">
+        <button class="btn toggle need need-cam" id="trackBtn" aria-pressed="false">Track person<kbd>T</kbd></button>
+        <button class="btn toggle need" id="tiltBtn" aria-pressed="false" title="Also follow up and down">Tilt</button>
+      </div>
+      <div class="track-hint" id="trackHint">Arrow keys pan and tilt</div>
+    </section>
+
     <section>
       <h2>Zoom <em id="zoomNote">power zoom</em></h2>
       <div class="stack rocker">
@@ -373,6 +419,7 @@
     <section class="keys">
       <span>Click</span><span>Focus at point</span>
       <kbd>G</kbd><span>Toggle thirds grid</span>
+      <kbd>Esc</kbd><span>Stop tracking / gimbal</span>
     </section>
   </aside>
 </main>
@@ -493,6 +540,7 @@ viewer.addEventListener("click", async (e) => {
   if (!state.live || e.target.closest(".connect")) return;
   const r = viewer.getBoundingClientRect();
   const x = (e.clientX - r.left) / r.width, y = (e.clientY - r.top) / r.height;
+  if (await lockAt(x, y)) return;
   await afAt(x, y);
 });
 
@@ -511,6 +559,11 @@ function applyView() {
   img.style.width = quarter ? `${view.ar * 100}%` : "100%";
   img.style.height = quarter ? `${100 / view.ar}%` : "100%";
   img.style.transform = `translate(-50%, -50%) scaleX(${view.mirror ? -1 : 1}) rotate(${view.rot}deg)`;
+  const bx = $("#boxes");
+  bx.style.width = img.style.width;
+  bx.style.height = img.style.height;
+  bx.style.transform = img.style.transform;
+  setTimeout(() => trackConfig(), 0);  // trackConfig is defined further down
   $("#rotVal").textContent = `${view.rot}°`;
   $("#rotBtn").setAttribute("aria-pressed", String(view.rot !== 0));
   $("#mirBtn").setAttribute("aria-pressed", String(view.mirror));
@@ -577,6 +630,7 @@ document.addEventListener("keydown", (e) => {
   if (e.target.tagName === "INPUT") return;
   if (e.key === "Shift") state.shift = true;
   if (state.view !== "shoot") return;
+  if (ARROWS[e.key]) { e.preventDefault(); if (!e.repeat) gPress(ARROWS[e.key]); return; }
   if (e.repeat || e.ctrlKey || e.metaKey || e.altKey) return;
   const k = e.key.toLowerCase();
   if (KEY_HOLD[k]) press(KEY_HOLD[k]);
@@ -586,11 +640,173 @@ document.addEventListener("keydown", (e) => {
   else if (k === "g") $("#thirds").classList.toggle("off");
   else if (k === "v") rotate(e.shiftKey ? -1 : 1);
   else if (k === "m") mirror();
+  else if (k === "t") toggleTrack();
+  else if (k === "b") gConnect();
+  else if (e.key === "Escape") { if (track.on) toggleTrack(); else gStop(); }
 });
 document.addEventListener("keyup", (e) => {
   if (e.key === "Shift") state.shift = false;
+  if (ARROWS[e.key]) gRelease(ARROWS[e.key]);
   const name = KEY_HOLD[e.key.toLowerCase()];
   if (name) release(name);
+});
+
+/* ---------- gimbal ---------- */
+const ARROWS = { ArrowUp: "up", ArrowDown: "down", ArrowLeft: "left", ArrowRight: "right" };
+const gim = { state: "off", held: new Set(), timer: null, sign: { pan: 1, tilt: 1 } };
+const gTop = () => +$("#gSpeed").value * 9 * (state.shift ? 2 : 1);  // ~0.1 deg/s units; 100% ~ 90 deg/s
+
+function showGimbal(g) {
+  if (!g) return;
+  gim.state = g.state;
+  const on = g.state === "on";
+  $("#gimbalSec").classList.toggle("on", on);
+  const st = $("#gStatus");
+  st.textContent = on ? (g.name || "connected").replace(/^DJI\s*/, "") : g.state === "connecting" ? "connecting..." : "offline";
+  st.className = on ? "on" : g.error ? "warn" : "";
+  st.title = g.error || "";
+  $("#gConnect").hidden = on;
+  $("#gPad").hidden = !on;
+  if (!on && track.on) setTrackUi(false);
+}
+async function gConnect() {
+  if (gim.state === "on" || gim.state === "connecting") return;
+  const btn = $("#gConnect"), label = btn.querySelector("span");
+  btn.disabled = true;
+  label.textContent = "Searching for gimbal...";
+  showGimbal({ state: "connecting" });
+  const res = await post("/api/gimbal/connect", {});
+  log("gimbal", res);
+  btn.disabled = false;
+  label.textContent = "Connect gimbal";
+  showGimbal(res.gimbal || { state: "off", error: res.error });
+}
+function gVector() {
+  const h = gim.held;
+  const pan = (h.has("right") ? 1 : 0) - (h.has("left") ? 1 : 0);
+  const tilt = (h.has("up") ? 1 : 0) - (h.has("down") ? 1 : 0);
+  // Signs come from the tracker, which learns which way the gimbal turns; up on screen is -y.
+  return { yaw: pan * gTop() * gim.sign.pan, pitch: -tilt * gTop() * 0.6 * gim.sign.tilt };
+}
+async function gSend() {
+  const res = await post("/api/gimbal/move", gVector());
+  if (!res.ok) { log("gimbal", res); [...gim.held].forEach(gRelease); }
+}
+function gPress(dir) {
+  if (gim.state !== "on" || gim.held.has(dir)) return;
+  gim.held.add(dir);
+  document.querySelector(`[data-gdir="${dir}"]`)?.classList.add("held");
+  gSend();
+  // The server stops the gimbal 0.6 s after the last move, so keep refreshing while held.
+  if (!gim.timer) gim.timer = setInterval(gSend, 150);
+}
+function gRelease(dir) {
+  if (!gim.held.delete(dir)) return;
+  document.querySelector(`[data-gdir="${dir}"]`)?.classList.remove("held");
+  if (!gim.held.size) { clearInterval(gim.timer); gim.timer = null; post("/api/gimbal/stop", {}); }
+  else gSend();
+}
+async function gStop() {
+  [...gim.held].forEach(gRelease);
+  if (gim.state === "on") log("gimbal stop", await post("/api/gimbal/stop", {}));
+}
+document.querySelectorAll("[data-gdir]").forEach((b) => {
+  const dir = b.dataset.gdir;
+  b.addEventListener("pointerdown", (e) => { b.setPointerCapture(e.pointerId); gPress(dir); });
+  for (const ev of ["pointerup", "pointercancel", "lostpointercapture"]) b.addEventListener(ev, () => gRelease(dir));
+});
+window.addEventListener("blur", () => [...gim.held].forEach(gRelease));
+$("#gStop").addEventListener("click", () => { if (track.on) toggleTrack(); gStop(); });
+$("#gConnect").addEventListener("click", gConnect);
+function saveGimbalPrefs() {
+  try { localStorage.setItem("g7gimbal", JSON.stringify({ speed: +$("#gSpeed").value, tilt: track.tilt })); } catch {}
+}
+$("#gSpeed").addEventListener("input", () => {
+  $("#gSpeedVal").textContent = $("#gSpeed").value + "%";
+  saveGimbalPrefs();
+  trackConfig();
+});
+
+/* ---------- person tracking ---------- */
+const track = { on: false, tilt: false, people: [], locked: null, timer: null, sent: "" };
+try {
+  const saved = JSON.parse(localStorage.getItem("g7gimbal") || "{}");
+  if (saved.speed) { $("#gSpeed").value = saved.speed; $("#gSpeedVal").textContent = saved.speed + "%"; }
+  track.tilt = !!saved.tilt;
+  $("#tiltBtn").setAttribute("aria-pressed", String(track.tilt));
+} catch {}
+const trackCfg = () => ({ rot: view.rot, mirror: view.mirror, tilt: track.tilt, speed: +$("#gSpeed").value * 9 });
+function trackConfig() {
+  if (!track.on) return;
+  const c = JSON.stringify(trackCfg());
+  if (c !== track.sent) { track.sent = c; post("/api/track/config", trackCfg()); }
+}
+function setTrackUi(on) {
+  track.on = on;
+  $("#trackBtn").setAttribute("aria-pressed", String(on));
+  viewer.classList.toggle("tracking", on);
+  clearInterval(track.timer);
+  track.timer = on ? setInterval(trackPoll, 120) : null;
+  if (!on) {
+    track.people = [];
+    drawBoxes();
+    $("#trackHint").textContent = "Arrow keys pan and tilt";
+    $("#trackHint").className = "track-hint";
+  }
+}
+async function toggleTrack() {
+  const on = !track.on;
+  if (on && (gim.state !== "on" || !state.live)) {
+    log("track", { ok: false, error: gim.state !== "on" ? "connect the gimbal first" : "connect the camera first" });
+    return;
+  }
+  const hint = $("#trackHint");
+  if (on) { hint.textContent = "Loading person detector..."; hint.className = "track-hint live"; }
+  track.sent = JSON.stringify(trackCfg());
+  const res = await post("/api/track/enable", { on, ...trackCfg() });
+  log(on ? "track on" : "track off", res);
+  if (res.ok) setTrackUi(on);
+  else if (on) { hint.textContent = res.error; hint.className = "track-hint"; }
+}
+async function trackPoll() {
+  let s;
+  try { s = await (await fetch("/api/track")).json(); } catch { return; }
+  showGimbal(s.gimbal);
+  gim.sign = s.sign || gim.sign;
+  if (!s.enabled) { if (track.on) setTrackUi(false); return; }
+  track.people = s.people || [];
+  track.locked = s.target ? s.target.id : null;
+  drawBoxes();
+  const hint = $("#trackHint");
+  hint.className = "track-hint live";
+  const learning = s.calibrated && !s.calibrated.pan ? " - learning pan direction" : "";
+  hint.textContent = s.error ? s.error
+    : s.target ? `Following person ${s.target.id}${learning}`
+    : track.people.length ? "Lost them - click a person to lock on" : "Looking for a person...";
+}
+function drawBoxes() {
+  $("#boxes").replaceChildren(...track.people.map((p) => {
+    const [x1, y1, x2, y2] = p.box;
+    const i = document.createElement("i");
+    if (p.id === track.locked) i.className = "lock";
+    Object.assign(i.style, { left: `${x1 * 100}%`, top: `${y1 * 100}%`, width: `${(x2 - x1) * 100}%`, height: `${(y2 - y1) * 100}%` });
+    return i;
+  }));
+}
+async function lockAt(x, y) {
+  if (!track.on) return false;
+  const [sx, sy] = toSensor(x, y);
+  if (!track.people.some((p) => sx >= p.box[0] && sx <= p.box[2] && sy >= p.box[1] && sy <= p.box[3])) return false;
+  const res = await post("/api/track/lock", { x: sx, y: sy });
+  log("lock on", res);
+  return res.ok;
+}
+$("#trackBtn").addEventListener("click", toggleTrack);
+$("#tiltBtn").addEventListener("click", () => {
+  track.tilt = !track.tilt;
+  $("#tiltBtn").setAttribute("aria-pressed", String(track.tilt));
+  saveGimbalPrefs();
+  trackConfig();
 });
 
 /* ---------- connection + status ---------- */
@@ -652,6 +868,7 @@ async function poll() {
       else setLink("err", "no reply");
     } catch { setLink("err", "GUI server down"); }
   }
+  if (!track.on) { try { showGimbal(await (await fetch("/api/gimbal")).json()); } catch {} }
   setTimeout(poll, 1500);
 }
 
@@ -849,6 +1066,8 @@ $("#fDownload").addEventListener("click", async () => {
     try { last = localStorage.getItem("g7ip"); } catch {}
     $("#ip").value = info.ip !== "192.168.54.1" ? info.ip : last || info.ip;
     $("#demoTag").hidden = !info.demo;
+    showGimbal(info.gimbal);
+    if (info.track && info.track.enabled) setTrackUi(true);
     if (!info.connected && !info.demo) findCameras();
     if (info.connected) goLive(info.ip, null);
     else if (info.demo) $("#connectForm").requestSubmit();  // nothing to set up in demo mode

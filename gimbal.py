@@ -22,6 +22,8 @@ import argparse
 import asyncio
 import struct
 import sys
+import threading
+import time
 from dataclasses import dataclass
 
 SERVICE = "0000fff0-0000-1000-8000-00805f9b34fb"
@@ -112,6 +114,7 @@ class Gimbal:
         self._speed = (0, 0, 0)
         self._streaming: asyncio.Task | None = None
         self.on_frame = None  # callback(Frame)
+        self.on_disconnect = None  # callback()
 
     async def connect(self, timeout: float = 20.0) -> str:
         from bleak import BleakClient, BleakScanner
@@ -120,7 +123,8 @@ class Gimbal:
             lambda d, a: (a.local_name or d.name or "").upper().startswith("DJI " + NAME_HINT), timeout=timeout)
         if not dev:
             raise RuntimeError("gimbal not found; is it on, and is the Ronin app closed?")
-        self._client = BleakClient(dev, timeout=timeout)
+        self._client = BleakClient(dev, timeout=timeout,
+                                   disconnected_callback=lambda _: self.on_disconnect and self.on_disconnect())
         await self._client.connect()
         await self._client.start_notify(NOTIFY, self._notified)
         return dev.name or dev.address
@@ -138,6 +142,8 @@ class Gimbal:
 
     async def set_speed(self, yaw: int = 0, roll: int = 0, pitch: int = 0) -> None:
         """Set a continuous speed; it is resent at 10 Hz until changed or stop() is called."""
+        if not (yaw or roll or pitch):
+            return await self.stop()  # streaming zeros would hold off the gimbal's own joystick
         self._speed = (yaw, roll, pitch)
         if self._streaming is None:
             self._streaming = asyncio.create_task(self._stream())
@@ -163,6 +169,73 @@ class Gimbal:
         finally:
             if self._client:
                 await self._client.disconnect()
+
+
+class GimbalLink:
+    """Drives a Gimbal from ordinary threads: it owns a private asyncio loop, and a watchdog stops the
+    gimbal when move() has not been called for `timeout` seconds (a closed tab must not leave it panning)."""
+
+    def __init__(self, timeout: float = 0.6):
+        self.timeout = timeout
+        self.state, self.name, self.error = "off", "", ""
+        self.speed = (0, 0, 0)  # yaw, roll, pitch as last sent
+        self._g: Gimbal | None = None
+        self._last = 0.0
+        self.loop = asyncio.new_event_loop()
+        threading.Thread(target=self.loop.run_forever, daemon=True, name="gimbal-loop").start()
+        asyncio.run_coroutine_threadsafe(self._watchdog(), self.loop)
+
+    def _run(self, coro, timeout: float):
+        return asyncio.run_coroutine_threadsafe(coro, self.loop).result(timeout)
+
+    def status(self) -> dict:
+        return {"state": self.state, "name": self.name, "error": self.error, "moving": any(self.speed)}
+
+    def connect(self) -> None:
+        if self.state == "on":
+            return
+        self.state, self.error = "connecting", ""
+        g = Gimbal()
+        g.on_disconnect = self._lost
+        try:
+            self.name = self._run(g.connect(), 45)
+        except Exception as e:  # bleak raises several unrelated types; report whatever it said
+            self.state, self.error = "off", str(e) or type(e).__name__
+            raise RuntimeError(self.error) from e
+        self._g, self.state = g, "on"
+
+    def _lost(self) -> None:
+        self._g, self.state, self.error, self.speed = None, "off", "gimbal disconnected", (0, 0, 0)
+
+    def move(self, yaw: float = 0, pitch: float = 0, roll: float = 0) -> None:
+        """Set speeds (about 0.1 deg/s per unit); call again at least every `timeout` seconds to keep moving."""
+        if self.state != "on" or not self._g:
+            raise RuntimeError("gimbal not connected")
+        self._last = time.monotonic()
+        v = tuple(max(-1500, min(1500, int(round(x)))) for x in (yaw, roll, pitch))
+        if v != self.speed:
+            self.speed = v
+            self._run(self._g.set_speed(*v), 5)
+
+    def stop(self) -> None:
+        self.speed = (0, 0, 0)
+        if self._g:
+            self._run(self._g.stop(), 5)
+
+    async def _watchdog(self) -> None:
+        while True:
+            await asyncio.sleep(0.1)
+            if self._g and any(self.speed) and time.monotonic() - self._last > self.timeout:
+                self.speed = (0, 0, 0)
+                await self._g.stop()
+
+    def close(self) -> None:
+        if self._g:
+            try:
+                self._run(self._g.close(), 10)
+            except Exception:  # already gone; nothing left to stop
+                pass
+        self._g, self.state = None, "off"
 
 
 # --- CLI -----------------------------------------------------------------------------------
