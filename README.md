@@ -139,12 +139,11 @@ Close the Ronin app first, because the gimbal accepts one connection at a time.
 | Pan and tilt | hold the arrow pad | hold the arrow keys (Shift doubles the speed) |
 | Stop | **STOP** | **Esc** |
 | Follow a person | **Track person** | **T** |
-| Follow someone else | click their box in the live view | |
 | Follow up and down as well | **Tilt** | |
 
 **Track person** finds people in the live view with YOLO (`yolo11n`, downloaded on first use, 5 MB).
-It draws a box around each person and follows the largest one. Click a box to follow someone else.
-The gimbal pans to keep that person's upper body near the centre of the frame, and **Speed** sets
+It draws a box around each person and follows whoever is in frame: the same person while they stay
+visible, otherwise the nearest or biggest one. The gimbal pans to keep that person's upper body near the centre of the frame, and **Speed** sets
 how fast it may turn. Rotate and Mirror are taken into account, so it works with a portrait-mounted
 camera.
 

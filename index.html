@@ -540,7 +540,6 @@ viewer.addEventListener("click", async (e) => {
   if (!state.live || e.target.closest(".connect")) return;
   const r = viewer.getBoundingClientRect();
   const x = (e.clientX - r.left) / r.width, y = (e.clientY - r.top) / r.height;
-  if (await lockAt(x, y)) return;
   await afAt(x, y);
 });
 
@@ -735,7 +734,8 @@ try {
   track.tilt = !!saved.tilt;
   $("#tiltBtn").setAttribute("aria-pressed", String(track.tilt));
 } catch {}
-const trackCfg = () => ({ rot: view.rot, mirror: view.mirror, tilt: track.tilt, speed: +$("#gSpeed").value * 9 });
+// Tracking may turn faster than the arrow keys: 100% is about 150 deg/s.
+const trackCfg = () => ({ rot: view.rot, mirror: view.mirror, tilt: track.tilt, speed: +$("#gSpeed").value * 15 });
 function trackConfig() {
   if (!track.on) return;
   const c = JSON.stringify(trackCfg());
@@ -782,7 +782,7 @@ async function trackPoll() {
   const learning = s.calibrated && !s.calibrated.pan ? " - learning pan direction" : "";
   hint.textContent = s.error ? s.error
     : s.target ? `Following person ${s.target.id}${learning}`
-    : track.people.length ? "Lost them - click a person to lock on" : "Looking for a person...";
+    : "Looking for a person...";
 }
 function drawBoxes() {
   $("#boxes").replaceChildren(...track.people.map((p) => {
@@ -792,14 +792,6 @@ function drawBoxes() {
     Object.assign(i.style, { left: `${x1 * 100}%`, top: `${y1 * 100}%`, width: `${(x2 - x1) * 100}%`, height: `${(y2 - y1) * 100}%` });
     return i;
   }));
-}
-async function lockAt(x, y) {
-  if (!track.on) return false;
-  const [sx, sy] = toSensor(x, y);
-  if (!track.people.some((p) => sx >= p.box[0] && sx <= p.box[2] && sy >= p.box[1] && sy <= p.box[3])) return false;
-  const res = await post("/api/track/lock", { x: sx, y: sy });
-  log("lock on", res);
-  return res.ok;
 }
 $("#trackBtn").addEventListener("click", toggleTrack);
 $("#tiltBtn").addEventListener("click", () => {

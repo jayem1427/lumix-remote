@@ -13,6 +13,8 @@ from pathlib import Path
 
 CAL_FILE = Path.home() / ".g7remote.json"
 MODEL = str(Path(__file__).with_name("yolo11n.pt"))
+CONF = 0.2  # detection threshold; live view is small, so people score lower than in photos
+COAST_S = 0.6  # keep steering toward the last box this long when a frame finds nobody
 
 
 def to_display(x: float, y: float, rot: int, mirror: bool) -> tuple[float, float]:
@@ -76,7 +78,7 @@ class Tracker:
         self.target: dict | None = None
         self.people: list[dict] = []
         self.fps = 0.0
-        self.cfg = {"rot": 0, "mirror": False, "tilt": False, "gain": 2.2, "speed": 700}
+        self.cfg = {"rot": 0, "mirror": False, "tilt": False, "gain": 3.0, "speed": 900}
         cal = self._load_cal()
         self.pan = Axis(cal.get("pan", 1), "pan" in cal)
         self.tilt = Axis(cal.get("tilt", 1), "tilt" in cal)
@@ -158,22 +160,6 @@ class Tracker:
         if not on:
             self._halt()
 
-    def lock_at(self, x: float, y: float) -> int | None:
-        """Lock onto the person whose box holds sensor point (x, y); the smallest such box wins."""
-        with self._lock:
-            hits = [p for p in self.people if p["box"][0] <= x <= p["box"][2] and p["box"][1] <= y <= p["box"][3]]
-        if not hits:
-            return None
-        best = min(hits, key=lambda p: (p["box"][2] - p["box"][0]) * (p["box"][3] - p["box"][1]))
-        self.locked = best["id"]
-        self._last_box = best["box"]
-        self._last_seen = time.monotonic()
-        return self.locked
-
-    def unlock(self) -> None:
-        self.locked = None
-        self._halt()
-
     def _halt(self) -> None:
         if self.gimbal.state == "on" and any(self.gimbal.speed) and time.monotonic() > self.manual_until():
             try:
@@ -197,7 +183,7 @@ class Tracker:
             if frame is None:
                 continue
             h, w = frame.shape[:2]
-            res = self.model.track(frame, persist=True, classes=[0], imgsz=480, conf=0.35, verbose=False,
+            res = self.model.track(frame, persist=True, classes=[0], imgsz=640, conf=CONF, verbose=False,
                                    tracker="bytetrack.yaml")[0]
             people = []
             if res.boxes is not None and res.boxes.id is not None:
@@ -215,30 +201,27 @@ class Tracker:
                 self._steer(target, dt, now)
 
     def _pick(self, people: list[dict], now: float) -> dict | None:
-        if self.locked is not None:
-            for p in people:
-                if p["id"] == self.locked:
-                    self._last_box, self._last_seen = p["box"], now
-                    return p
-            # ByteTrack can hand a briefly hidden person a new id: re-acquire the nearest similar box.
-            if self._last_box and now - self._last_seen < 3.0 and people:
-                lx, ly = (self._last_box[0] + self._last_box[2]) / 2, (self._last_box[1] + self._last_box[3]) / 2
-                lw = self._last_box[2] - self._last_box[0]
-
-                def dist(p):
-                    b = p["box"]
-                    return abs((b[0] + b[2]) / 2 - lx) + abs((b[1] + b[3]) / 2 - ly) + abs((b[2] - b[0]) - lw)
-
-                near = min(people, key=dist)
-                if dist(near) < 0.25:
-                    self.locked, self._last_box, self._last_seen = near["id"], near["box"], now
-                    return near
+        """Follow whoever is in frame: the same person while they are visible, else the nearest to
+        where the last one was, else the biggest. A short gap in detections keeps the last box."""
+        if not people:
+            if self._last_box and now - self._last_seen < COAST_S:
+                return {"id": self.locked, "box": self._last_box, "coast": True}
+            self.locked = None
             return None
-        if self.enabled and people:  # nobody picked: follow the biggest person and lock on
-            big = max(people, key=lambda p: (p["box"][2] - p["box"][0]) * (p["box"][3] - p["box"][1]))
-            self.locked, self._last_box, self._last_seen = big["id"], big["box"], now
-            return big
-        return None
+
+        def area(p):
+            b = p["box"]
+            return (b[2] - b[0]) * (b[3] - b[1])
+
+        pick = next((p for p in people if p["id"] == self.locked), None)
+        if pick is None and self._last_box and now - self._last_seen < 1.5:
+            lb = self._last_box
+            pick = min(people, key=lambda p: abs(p["box"][0] + p["box"][2] - lb[0] - lb[2])
+                       + abs(p["box"][1] + p["box"][3] - lb[1] - lb[3]))
+        if pick is None:
+            pick = max(people, key=area)
+        self.locked, self._last_box, self._last_seen = pick["id"], pick["box"], now
+        return pick
 
     def _steer(self, target: dict | None, dt: float, now: float) -> None:
         if self.gimbal.state != "on" or now < self.manual_until():
@@ -255,8 +238,10 @@ class Tracker:
         cx, cy = to_display((b[0] + b[2]) / 2, b[1] + 0.33 * (b[3] - b[1]), self.cfg["rot"], self.cfg["mirror"])
         g, top = self.cfg["gain"], self.cfg["speed"]
         before = (self.pan.calibrated, self.tilt.calibrated)
-        yaw = self.pan.step(cx - 0.5, dt, g, top, 0.04)
-        pitch = self.tilt.step(cy - 0.42, dt, g, top * 0.6, 0.06) if self.cfg["tilt"] else 0.0
+        if target.get("coast"):
+            g *= 0.5  # the box is stale; ease off rather than overshoot
+        yaw = self.pan.step(cx - 0.5, dt, g, top, 0.025)
+        pitch = self.tilt.step(cy - 0.42, dt, g, top * 0.6, 0.05) if self.cfg["tilt"] else 0.0
         try:
             self.gimbal.move(yaw=yaw, pitch=pitch)
         except RuntimeError as e:

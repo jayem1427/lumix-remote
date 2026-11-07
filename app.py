@@ -131,11 +131,6 @@ class App:
             if a.get("on"):
                 t.start()
             t.enable(bool(a.get("on")))
-        elif action == "lock":
-            if t.lock_at(float(a["x"]), float(a["y"])) is None:
-                raise ValueError("no person at that point")
-        elif action == "unlock":
-            t.unlock()
         elif action == "recalibrate":
             t.recalibrate()
         elif action != "config":
