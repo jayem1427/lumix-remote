@@ -62,7 +62,7 @@ class Axis:
             u = 0.0
         else:
             e = (mag - dead) * (1 if err > 0 else -1)
-            u = gain * e + 0.12 * gain * self.d
+            u = gain * e + 0.25 * gain * self.d
         u = max(-1.0, min(1.0, u))
         self.prev_cmd = u
         return self.sign * u * max_speed
@@ -78,7 +78,7 @@ class Tracker:
         self.target: dict | None = None
         self.people: list[dict] = []
         self.fps = 0.0
-        self.cfg = {"rot": 0, "mirror": False, "tilt": False, "gain": 3.0, "speed": 900}
+        self.cfg = {"rot": 0, "mirror": False, "tilt": False, "gain": 2.0, "speed": 900}
         cal = self._load_cal()
         self.pan = Axis(cal.get("pan", 1), "pan" in cal)
         self.tilt = Axis(cal.get("tilt", 1), "tilt" in cal)
