@@ -17,6 +17,14 @@ CONF = 0.2  # detection threshold; live view is small, so people score lower tha
 COAST_S = 0.6  # keep steering toward the last box this long when a frame finds nobody
 
 
+ROTATE = {90: "ROTATE_90_CLOCKWISE", 180: "ROTATE_180", 270: "ROTATE_90_COUNTERCLOCKWISE"}
+
+
+def to_sensor(x: float, y: float, rot: int) -> tuple[float, float]:
+    """Point in the upright (rotated, unmirrored) frame -> sensor point."""
+    return {0: (x, y), 90: (y, 1 - x), 180: (1 - x, 1 - y), 270: (1 - y, x)}[rot]
+
+
 def to_display(x: float, y: float, rot: int, mirror: bool) -> tuple[float, float]:
     """Sensor point -> point as the GUI shows it (inverse of index.html's toSensor)."""
     if rot == 90:
@@ -29,41 +37,45 @@ def to_display(x: float, y: float, rot: int, mirror: bool) -> tuple[float, float
 
 
 class Axis:
-    """One steering axis: proportional-derivative control plus a check that learns which way is which.
+    """One steering axis: a smooth proportional controller plus a check that learns which way is which.
 
+    It starts moving only when the subject is clearly off centre, stops once they are close, and changes
+    speed gradually, so a subject standing still gets a still camera.
     Panning toward the subject should shrink its framing error. If, while we command a speed, the error
     keeps moving the same way as the command, the gimbal's sign is the other way round and we flip it.
     """
 
+    START, STOP = 0.07, 0.025  # framing error (fraction of the frame) to begin and end a move
+    SLEW = 2.5  # largest change in command per second, as a fraction of top speed
+
     def __init__(self, sign: int = 1, calibrated: bool = False):
         self.sign, self.calibrated = sign, calibrated
         self.evidence, self.samples = 0.0, 0
-        self.prev_err: float | None = None
-        self.prev_cmd = 0.0
-        self.d = 0.0
+        self.moving = False
+        self.reset()
 
     def reset(self) -> None:
-        self.prev_err, self.prev_cmd, self.d = None, 0.0, 0.0
+        self.prev_err: float | None = None
+        self.prev_cmd = 0.0
+        self.moving = False
 
-    def step(self, err: float, dt: float, gain: float, max_speed: float, dead: float) -> float:
-        if self.prev_err is not None and dt > 0:
-            delta = err - self.prev_err
-            self.d = 0.6 * self.d + 0.4 * delta / dt
-            if not self.calibrated and abs(self.prev_cmd) > 0.08:
-                self.evidence += self.prev_cmd * delta
-                self.samples += 1
-                if self.samples >= 6 and self.evidence > 0.04:
-                    self.sign, self.evidence, self.samples = -self.sign, 0.0, 0
-                elif self.samples >= 10 and self.evidence < -0.04:
-                    self.calibrated = True
+    def step(self, err: float, dt: float, gain: float, max_speed: float, scale: float = 1.0) -> float:
+        dt = min(max(dt, 1e-3), 0.25)
+        if self.prev_err is not None and not self.calibrated and abs(self.prev_cmd) > 0.08:
+            self.evidence += self.prev_cmd * (err - self.prev_err)
+            self.samples += 1
+            if self.samples >= 6 and self.evidence > 0.04:
+                self.sign, self.evidence, self.samples = -self.sign, 0.0, 0
+            elif self.samples >= 10 and self.evidence < -0.04:
+                self.calibrated = True
         self.prev_err = err
-        mag = abs(err)
-        if mag < dead:
+        mag = abs(err * scale)
+        self.moving = mag > (self.STOP if self.moving else self.START)
+        want = max(-1.0, min(1.0, gain * err * scale)) if self.moving else 0.0
+        limit = self.SLEW * dt
+        u = self.prev_cmd + max(-limit, min(limit, want - self.prev_cmd))
+        if not self.moving and abs(u) < 0.03:
             u = 0.0
-        else:
-            e = (mag - dead) * (1 if err > 0 else -1)
-            u = gain * e + 0.25 * gain * self.d
-        u = max(-1.0, min(1.0, u))
         self.prev_cmd = u
         return self.sign * u * max_speed
 
@@ -78,12 +90,14 @@ class Tracker:
         self.target: dict | None = None
         self.people: list[dict] = []
         self.fps = 0.0
-        self.cfg = {"rot": 0, "mirror": False, "tilt": False, "gain": 2.0, "speed": 900}
+        self.cfg = {"rot": 0, "mirror": False, "tilt": False, "gain": 0.8, "speed": 900}
         cal = self._load_cal()
         self.pan = Axis(cal.get("pan", 1), "pan" in cal)
         self.tilt = Axis(cal.get("tilt", 1), "tilt" in cal)
         self._last_seen = 0.0
         self._last_box: list[float] | None = None
+        self._last_up: list[float] | None = None
+        self._aim: tuple[float, float] | None = None
         self._thread: threading.Thread | None = None
         self._stop = threading.Event()
         self._lock = threading.Lock()
@@ -182,6 +196,9 @@ class Tracker:
             frame = cv2.imdecode(np.frombuffer(jpeg, np.uint8), cv2.IMREAD_COLOR)
             if frame is None:
                 continue
+            rot = self.cfg["rot"]
+            if rot in ROTATE:  # people must stand upright for the detector to find them reliably
+                frame = cv2.rotate(frame, getattr(cv2, ROTATE[rot]))
             h, w = frame.shape[:2]
             res = self.model.track(frame, persist=True, classes=[0], imgsz=640, conf=CONF, verbose=False,
                                    tracker="bytetrack.yaml")[0]
@@ -189,14 +206,18 @@ class Tracker:
             if res.boxes is not None and res.boxes.id is not None:
                 for (x1, y1, x2, y2), tid, c in zip(res.boxes.xyxy.tolist(), res.boxes.id.int().tolist(),
                                                     res.boxes.conf.tolist()):
-                    people.append({"id": tid, "conf": round(c, 2),
-                                   "box": [round(x1 / w, 4), round(y1 / h, 4), round(x2 / w, 4), round(y2 / h, 4)]})
+                    up = [x1 / w, y1 / h, x2 / w, y2 / h]
+                    (ax, ay), (bx, by) = to_sensor(up[0], up[1], rot), to_sensor(up[2], up[3], rot)
+                    people.append({"id": tid, "conf": round(c, 2), "up": up,
+                                   "box": [round(min(ax, bx), 4), round(min(ay, by), 4),
+                                           round(max(ax, bx), 4), round(max(ay, by), 4)]})
             now = time.monotonic()
             dt, t_prev = now - t_prev, now
             self.fps = 0.8 * self.fps + 0.2 * (1 / dt if dt > 0 else 0)
             target = self._pick(people, now)
             with self._lock:
-                self.people, self.target = people, target
+                self.people = [{k: v for k, v in q.items() if k != "up"} for q in people]
+                self.target = target and {k: v for k, v in target.items() if k != "up"}
             if self.enabled:
                 self._steer(target, dt, now)
 
@@ -205,7 +226,7 @@ class Tracker:
         where the last one was, else the biggest. A short gap in detections keeps the last box."""
         if not people:
             if self._last_box and now - self._last_seen < COAST_S:
-                return {"id": self.locked, "box": self._last_box, "coast": True}
+                return {"id": self.locked, "box": self._last_box, "up": self._last_up, "coast": True}
             self.locked = None
             return None
 
@@ -221,6 +242,7 @@ class Tracker:
         if pick is None:
             pick = max(people, key=area)
         self.locked, self._last_box, self._last_seen = pick["id"], pick["box"], now
+        self._last_up = pick["up"]
         return pick
 
     def _steer(self, target: dict | None, dt: float, now: float) -> None:
@@ -231,17 +253,22 @@ class Tracker:
         if target is None:
             self.pan.reset()
             self.tilt.reset()
+            self._aim = None
             self._halt()
             return
-        b = target["box"]
-        # Aim at the upper body (a third of the way down the box) and keep it a little above centre.
-        cx, cy = to_display((b[0] + b[2]) / 2, b[1] + 0.33 * (b[3] - b[1]), self.cfg["rot"], self.cfg["mirror"])
+        b = target["up"]
+        # Pan on the box centre; tilt on the upper body, kept a little above the middle.
+        x, y = (b[0] + b[2]) / 2, b[1] + 0.3 * (b[3] - b[1])
+        if self.cfg["mirror"]:
+            x = 1 - x
+        a = 0.5  # smoothing: detections jitter a few percent from frame to frame
+        self._aim = (x, y) if self._aim is None else (self._aim[0] + a * (x - self._aim[0]), self._aim[1] + a * (y - self._aim[1]))
+        cx, cy = self._aim
         g, top = self.cfg["gain"], self.cfg["speed"]
         before = (self.pan.calibrated, self.tilt.calibrated)
-        if target.get("coast"):
-            g *= 0.5  # the box is stale; ease off rather than overshoot
-        yaw = self.pan.step(cx - 0.5, dt, g, top, 0.025)
-        pitch = self.tilt.step(cy - 0.42, dt, g, top * 0.6, 0.05) if self.cfg["tilt"] else 0.0
+        scale = 0.5 if target.get("coast") else 1.0  # the box is stale; ease off rather than overshoot
+        yaw = self.pan.step(cx - 0.5, dt, g, top, scale)
+        pitch = self.tilt.step(cy - 0.42, dt, g, top * 0.6, scale) if self.cfg["tilt"] else 0.0
         try:
             self.gimbal.move(yaw=yaw, pitch=pitch)
         except RuntimeError as e:
